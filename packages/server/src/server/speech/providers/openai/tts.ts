@@ -69,7 +69,11 @@ export class OpenAITTS implements TextToSpeechProvider {
 
       // Prefetched speech can wait through playback of an earlier sentence. Consume
       // the response here so fetch cannot collect it and cancel its unread body.
-      const audioStream = Readable.from([Buffer.from(await response.arrayBuffer())]);
+      let audio: Buffer = Buffer.from(await response.arrayBuffer());
+      if (this.config.responseFormat === "pcm") {
+        audio = this.stripWavContainer(audio);
+      }
+      const audioStream = Readable.from([audio]);
 
       const duration = Date.now() - startTime;
       this.logger.debug({ duration }, "Speech synthesis stream ready");
@@ -83,5 +87,39 @@ export class OpenAITTS implements TextToSpeechProvider {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`TTS synthesis failed: ${message}`, { cause: error });
     }
+  }
+
+  // Some OpenAI-compatible servers ignore `response_format: "pcm"` and return a WAV file.
+  // Played as raw PCM, its header is an audible pop at the start of every sentence.
+  private stripWavContainer(audio: Buffer): Buffer {
+    if (
+      audio.length < 12 ||
+      audio.toString("ascii", 0, 4) !== "RIFF" ||
+      audio.toString("ascii", 8, 12) !== "WAVE"
+    ) {
+      return audio;
+    }
+    let offset = 12;
+    while (offset + 8 <= audio.length) {
+      const chunkId = audio.toString("ascii", offset, offset + 4);
+      const chunkSize = audio.readUInt32LE(offset + 4);
+      const body = offset + 8;
+      if (chunkId === "fmt " && body + 16 <= audio.length) {
+        const sampleRate = audio.readUInt32LE(body + 4);
+        const channels = audio.readUInt16LE(body + 2);
+        const bitsPerSample = audio.readUInt16LE(body + 14);
+        if (sampleRate !== 24000 || channels !== 1 || bitsPerSample !== 16) {
+          this.logger.warn(
+            { sampleRate, channels, bitsPerSample },
+            "TTS server returned WAV that does not match 24kHz mono 16-bit PCM",
+          );
+        }
+      }
+      if (chunkId === "data") {
+        return audio.subarray(body, Math.min(body + chunkSize, audio.length));
+      }
+      offset = body + chunkSize + (chunkSize % 2);
+    }
+    return audio;
   }
 }
