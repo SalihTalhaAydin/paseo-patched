@@ -15,6 +15,10 @@ import type {
 
 export type { LogprobToken, TranscriptionResult };
 
+const TRANSCRIPTION_REQUEST_TIMEOUT_MS = 8000;
+const TRANSCRIPTION_MAX_RETRIES = 1;
+const WAV_HEADER_BYTES = 44;
+
 export interface STTConfig {
   apiKey: string;
   baseUrl?: string;
@@ -44,6 +48,17 @@ function isLogprobToken(value: unknown): value is LogprobToken {
 
 function isLogprobTokenArray(value: unknown): value is LogprobToken[] {
   return Array.isArray(value) && value.every((entry) => isLogprobToken(entry));
+}
+
+function wavDurationMs(buffer: Buffer): number | null {
+  if (buffer.length < WAV_HEADER_BYTES || buffer.toString("ascii", 0, 4) !== "RIFF") {
+    return null;
+  }
+  const byteRate = buffer.readUInt32LE(28);
+  if (byteRate === 0) {
+    return null;
+  }
+  return Math.round(((buffer.length - WAV_HEADER_BYTES) / byteRate) * 1000);
 }
 
 export class OpenAISTT implements SpeechToTextProvider {
@@ -124,11 +139,15 @@ export class OpenAISTT implements SpeechToTextProvider {
 
         const committedId = segmentId;
         const prev = previousSegmentId;
+        const audio = pcm16;
+        pcm16 = Buffer.alloc(0);
+        previousSegmentId = committedId;
+        segmentId = v4();
         emitter.emit("committed", { segmentId: committedId, previousSegmentId: prev });
 
         void (async () => {
           try {
-            if (pcm16.length === 0) {
+            if (audio.length === 0) {
               emitter.emit("transcript", {
                 segmentId: committedId,
                 transcript: "",
@@ -139,7 +158,7 @@ export class OpenAISTT implements SpeechToTextProvider {
               return;
             }
 
-            const wav = convertPCMToWavBuffer(pcm16);
+            const wav = convertPCMToWavBuffer(audio);
             const result = await transcribeAudio(
               wav,
               "audio/wav",
@@ -159,10 +178,6 @@ export class OpenAISTT implements SpeechToTextProvider {
             });
           } catch (err) {
             emitter.emit("error", err);
-          } finally {
-            previousSegmentId = committedId;
-            segmentId = v4();
-            pcm16 = Buffer.alloc(0);
           }
         })();
       },
@@ -189,7 +204,21 @@ export class OpenAISTT implements SpeechToTextProvider {
     prompt?: string,
   ): Promise<TranscriptionResult> {
     const startTime = Date.now();
+    const modelToUse = this.config.model ?? "whisper-1";
+    const audioMs = format === "audio/wav" ? wavDurationMs(audioBuffer) : null;
+    let requestStartTime: number | null = null;
     let tempFilePath: string | null = null;
+    const logTiming = (ok: boolean) => {
+      logger.info(
+        {
+          durationMs: Date.now() - (requestStartTime ?? startTime),
+          audioMs,
+          model: modelToUse,
+          ok,
+        },
+        "STT transcription timing",
+      );
+    };
 
     try {
       const ext = inferAudioExtension(format);
@@ -198,19 +227,24 @@ export class OpenAISTT implements SpeechToTextProvider {
 
       logger.debug({ tempFilePath, bytes: audioBuffer.length }, "Transcribing audio file");
 
-      const modelToUse = this.config.model ?? "whisper-1";
       const supportsLogprobs =
         modelToUse === "gpt-4o-transcribe" || modelToUse === "gpt-4o-mini-transcribe";
       const includeLogprobs: ["logprobs"] = ["logprobs"];
 
-      const response = await this.openaiClient.audio.transcriptions.create({
-        file: await import("fs").then((fs) => fs.createReadStream(tempFilePath!)),
-        ...(language === "auto" ? {} : { language }),
-        model: modelToUse,
-        ...(prompt ? { prompt } : {}),
-        ...(supportsLogprobs ? { include: includeLogprobs } : {}),
-        response_format: "json",
-      });
+      const file = await import("fs").then((fs) => fs.createReadStream(tempFilePath!));
+      requestStartTime = Date.now();
+      const response = await this.openaiClient.audio.transcriptions.create(
+        {
+          file,
+          ...(language === "auto" ? {} : { language }),
+          model: modelToUse,
+          ...(prompt ? { prompt } : {}),
+          ...(supportsLogprobs ? { include: includeLogprobs } : {}),
+          response_format: "json",
+        },
+        { timeout: TRANSCRIPTION_REQUEST_TIMEOUT_MS, maxRetries: TRANSCRIPTION_MAX_RETRIES },
+      );
+      logTiming(true);
 
       const duration = Date.now() - startTime;
       const confidenceThreshold = this.config.confidenceThreshold ?? -3.0;
@@ -254,6 +288,7 @@ export class OpenAISTT implements SpeechToTextProvider {
             : undefined,
       };
     } catch (error) {
+      logTiming(false);
       logger.error({ err: error }, "Transcription error");
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`STT transcription failed: ${message}`, { cause: error });
