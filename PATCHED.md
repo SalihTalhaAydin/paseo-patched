@@ -1,8 +1,8 @@
 # voice-patched
 
-Salih's fork of Paseo with voice fixes. It runs as a second daemon on port 6768 with home `~/.paseo-patched`. The packaged app's daemon on 6767 (`~/.paseo`) is not touched.
+Salih's fork of Paseo with voice fixes. Only the daemon (`packages/server`) is changed. It runs as a second daemon on port 6768 with home `~/.paseo-patched`. The packaged app's daemon on 6767 (`~/.paseo`) is not touched.
 
-- `origin`: https://github.com/SalihTalhaAydin/paseo (this branch)
+- `origin`: https://github.com/SalihTalhaAydin/paseo-patched (this branch)
 - `upstream`: https://github.com/getpaseo/paseo
 - Base: upstream `8c6de842a` (v0.14.0)
 
