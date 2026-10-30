@@ -157,5 +157,12 @@
     "react-native-gesture-handler": "~2.32.0",
     "react-native-reanimated": "4.5.5",
     "react-native-worklets": "0.10.4"
+  },
+  "allowScripts": {
+    "node-pty@1.2.0-beta.15": true,
+    "esbuild@0.27.3": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true,
+    "msgpackr-extract@3.0.4": true
   }
 }
