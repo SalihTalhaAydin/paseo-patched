@@ -120,6 +120,9 @@ describe("OpenCodeBridge", () => {
         })
         .parse(await response.json());
       const definitions = new Map(manifest.tools.map((tool) => [tool.name, tool]));
+      // Voice mode enables speak per session, so the plugin must register it up front.
+      expect(definitions.has("speak")).toBe(true);
+      expect(catalog.tools.has("speak")).toBe(false);
       const createDefinition = definitions.get("create_agent")!;
       const sendDefinition = definitions.get("send_agent_prompt")!;
       const topLevelCatalog = createPaseoToolCatalog(dependencies);
@@ -175,8 +178,11 @@ describe("OpenCodeBridge", () => {
           content: [{ type: "text", text: expect.stringContaining(child.id) }],
         });
         expect(child.workspaceId).toBe("manifest-workspace");
-        expect([...definitions.keys()]).toEqual([...catalog.tools.keys()]);
+        expect([...definitions.keys()].filter((name) => name !== "speak")).toEqual([
+          ...catalog.tools.keys(),
+        ]);
         for (const definition of manifest.tools) {
+          if (definition.name === "speak") continue;
           const accepted = catalog.getTool(definition.name)!;
           expect(definition.inputSchema).toEqual(serializePaseoToolInputParameters(accepted));
           expect(definition.description).toBe(accepted.description);

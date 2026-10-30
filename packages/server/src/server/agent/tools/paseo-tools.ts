@@ -615,7 +615,9 @@ export function createPaseoAgentToolManifest(
   options: PaseoToolHostDependencies,
 ): Pick<PaseoToolCatalog, "tools"> {
   // Plugins register before a caller exists, but every execution uses an agent-bound catalog.
-  return { tools: createToolCatalog(options, "agent").tools };
+  // The manifest is the superset of every agent tool, so voice-only tools are included here
+  // and filtered per session by the agent-bound catalog.
+  return { tools: createToolCatalog({ ...options, enableVoiceTools: true }, "agent").tools };
 }
 
 function createToolCatalog(
