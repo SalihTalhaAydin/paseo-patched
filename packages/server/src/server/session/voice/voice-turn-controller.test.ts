@@ -515,6 +515,132 @@ describe("voice turn controller", () => {
     }
   });
 
+  it("delivers a final transcript that arrives after its turn timed out", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createControllerHarness();
+
+      await harness.controller.start();
+      harness.detector.emit("speech_started");
+      await settleSerialQueue();
+      harness.detector.emit("speech_stopped");
+      await settleSerialQueue();
+      harness.sttSessions[0]?.emitCommitted({ segmentId: "segment-1", previousSegmentId: null });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settleSerialQueue();
+
+      harness.sttSessions[0]?.emitTranscript({
+        segmentId: "segment-1",
+        transcript: " late words ",
+        isFinal: true,
+      });
+      harness.sttSessions[0]?.emitTranscript({
+        segmentId: "segment-1",
+        transcript: "late words again",
+        isFinal: true,
+      });
+      await settleSerialQueue();
+
+      expect(harness.onFinalTranscript.mock.calls.map(([input]) => input.transcript)).toEqual([
+        "",
+        "late words",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a late final transcript once a later turn has been delivered", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createControllerHarness();
+
+      await harness.controller.start();
+      harness.detector.emit("speech_started");
+      await settleSerialQueue();
+      harness.detector.emit("speech_stopped");
+      await settleSerialQueue();
+      harness.sttSessions[0]?.emitCommitted({ segmentId: "segment-a", previousSegmentId: null });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settleSerialQueue();
+
+      harness.detector.emit("speech_started");
+      await settleSerialQueue();
+      harness.detector.emit("speech_stopped");
+      await settleSerialQueue();
+      harness.sttSessions[0]?.emitCommitted({
+        segmentId: "segment-b",
+        previousSegmentId: "segment-a",
+      });
+      harness.sttSessions[0]?.emitTranscript({
+        segmentId: "segment-b",
+        transcript: "second",
+        isFinal: true,
+      });
+      await settleSerialQueue();
+      harness.sttSessions[0]?.emitTranscript({
+        segmentId: "segment-a",
+        transcript: "first",
+        isFinal: true,
+      });
+      await settleSerialQueue();
+
+      expect(harness.onFinalTranscript.mock.calls.map(([input]) => input.transcript)).toEqual([
+        "",
+        "second",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a finalizing turn when new speech starts and delivers turns in order", async () => {
+    const harness = createControllerHarness();
+
+    await harness.controller.start();
+    harness.detector.emit("speech_started");
+    await settleSerialQueue();
+    harness.detector.emit("speech_stopped");
+    await settleSerialQueue();
+    harness.sttSessions[0]?.emitCommitted({ segmentId: "segment-a", previousSegmentId: null });
+
+    harness.detector.emit("speech_started");
+    await settleSerialQueue();
+    harness.detector.emit("speech_stopped");
+    await settleSerialQueue();
+    harness.sttSessions[0]?.emitCommitted({
+      segmentId: "segment-b",
+      previousSegmentId: "segment-a",
+    });
+
+    harness.sttSessions[0]?.emitTranscript({
+      segmentId: "segment-b",
+      transcript: "second",
+      isFinal: true,
+    });
+    await settleSerialQueue();
+    expect(harness.onFinalTranscript).not.toHaveBeenCalled();
+
+    harness.sttSessions[0]?.emitTranscript({
+      segmentId: "segment-a",
+      transcript: "first",
+      isFinal: true,
+    });
+    await settleSerialQueue();
+    await settleSerialQueue();
+
+    expect(harness.onFinalTranscript.mock.calls.map(([input]) => input.segmentId)).toEqual([
+      "segment-a",
+      "segment-b",
+    ]);
+    expect(harness.onFinalTranscript.mock.calls.map(([input]) => input.transcript)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
   it("reports STT errors and attempts one reconnect", async () => {
     const harness = createControllerHarness();
 
