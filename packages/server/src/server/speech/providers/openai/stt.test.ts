@@ -65,6 +65,14 @@ describe("OpenAISTT", () => {
     expect(transcriptionsCreateMock.mock.calls[0][0]).not.toHaveProperty("language");
   });
 
+  test("sends no language field when the session has no configured language", async () => {
+    mockTranscriptionResponse("hello");
+
+    await expect(transcribe({})).resolves.toBe("hello");
+    expect(transcriptionsCreateMock).toHaveBeenCalledTimes(1);
+    expect(transcriptionsCreateMock.mock.calls[0][0]).not.toHaveProperty("language");
+  });
+
   test("bounds each transcription request with a timeout and one retry", async () => {
     mockTranscriptionResponse("hello");
 
@@ -177,7 +185,7 @@ function mockTranscriptionResponse(text: string) {
   });
 }
 
-async function transcribe(options: { language: string; prompt?: string }): Promise<string> {
+async function transcribe(options: { language?: string; prompt?: string }): Promise<string> {
   const provider = new OpenAISTT(
     { apiKey: "sk-test", model: "gpt-4o-transcribe" },
     pino({ level: "silent" }),
