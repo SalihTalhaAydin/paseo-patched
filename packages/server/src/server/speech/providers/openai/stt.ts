@@ -50,6 +50,12 @@ function isLogprobTokenArray(value: unknown): value is LogprobToken[] {
   return Array.isArray(value) && value.every((entry) => isLogprobToken(entry));
 }
 
+function transcribeLanguageField(language: string | undefined): { language?: string } {
+  // The audio.cpp Parakeet worker rejects any `language` option, and the configured
+  // value is "auto" here, so the hint is sent only when a real language is configured.
+  return language && language !== "auto" ? { language } : {};
+}
+
 function wavDurationMs(buffer: Buffer): number | null {
   if (buffer.length < WAV_HEADER_BYTES || buffer.toString("ascii", 0, 4) !== "RIFF") {
     return null;
@@ -162,7 +168,7 @@ export class OpenAISTT implements SpeechToTextProvider {
             const result = await transcribeAudio(
               wav,
               "audio/wav",
-              params.language ?? "en",
+              params.language,
               logger,
               params.prompt,
             );
@@ -199,7 +205,7 @@ export class OpenAISTT implements SpeechToTextProvider {
   private async transcribeAudioInternal(
     audioBuffer: Buffer,
     format: string,
-    language: string,
+    language: string | undefined,
     logger: pino.Logger,
     prompt?: string,
   ): Promise<TranscriptionResult> {
@@ -236,7 +242,7 @@ export class OpenAISTT implements SpeechToTextProvider {
       const response = await this.openaiClient.audio.transcriptions.create(
         {
           file,
-          ...(language === "auto" ? {} : { language }),
+          ...transcribeLanguageField(language),
           model: modelToUse,
           ...(prompt ? { prompt } : {}),
           ...(supportsLogprobs ? { include: includeLogprobs } : {}),
