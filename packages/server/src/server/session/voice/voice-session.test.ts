@@ -160,7 +160,7 @@ async function settle(): Promise<void> {
 }
 
 describe("VoiceSession streaming transcription", () => {
-  test("interrupts playback and the agent on speech detection without partial transcripts", async () => {
+  test("speech detection stops playback but leaves the agent running until a transcript arrives", async () => {
     const tts: TextToSpeechProvider = {
       async synthesizeSpeech() {
         return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
@@ -182,6 +182,16 @@ describe("VoiceSession streaming transcription", () => {
         type: "voice_input_state",
         payload: { isSpeaking: true },
       });
+      expect(interrupted).toEqual([]);
+      await playback;
+      // A speak call made after the trigger must still produce audio.
+      const before = host.emitted.filter(isAudioOutput).length;
+      const later = speak({ text: "Still here." });
+      await vi.waitFor(() =>
+        expect(host.emitted.filter(isAudioOutput).length).toBeGreaterThan(before),
+      );
+      await voiceSession.handleAbort();
+      await later;
       expect(interrupted).toEqual([VOICE_AGENT_ID]);
       await playback;
     } finally {
@@ -833,7 +843,7 @@ describe("VoiceSession streaming transcription", () => {
       avgLogprob: -0.1,
       isLowConfidence: false,
     });
-    await settle();
+    await vi.waitFor(() => expect(host.spokenInput).toHaveLength(1));
 
     expect(sttSession.commitCount).toBe(1);
     expect(host.spokenInput).toEqual([
