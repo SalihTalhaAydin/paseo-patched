@@ -160,6 +160,14 @@ describe("VoiceSession streaming transcription", () => {
       });
       expect(interrupted).toEqual([]);
       await playback;
+      // A speak call made after the trigger must still produce audio.
+      const before = host.emitted.filter(isAudioOutput).length;
+      const later = speak({ text: "Still here." });
+      await vi.waitFor(() =>
+        expect(host.emitted.filter(isAudioOutput).length).toBeGreaterThan(before),
+      );
+      await voiceSession.handleAbort();
+      await later;
     } finally {
       await voiceSession.cleanup();
       await playback.catch(() => {});

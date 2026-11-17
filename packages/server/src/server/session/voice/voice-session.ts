@@ -1194,6 +1194,9 @@ export class VoiceSession {
     // once a non-empty transcript arrives, so a false trigger cannot kill work.
     this.abortController.abort();
     await this.handleAbort({ interruptAgent: false });
+    // Only playback that was already running is cut. Re-arm at once so a speak
+    // call made after this trigger is heard even if no transcript ever arrives.
+    this.createAbortController();
 
     const latencyMs = Date.now() - chunkReceivedAt;
     this.sessionLogger.debug(
