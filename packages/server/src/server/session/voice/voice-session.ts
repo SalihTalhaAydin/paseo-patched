@@ -174,6 +174,8 @@ export class VoiceSession {
   private readonly sttLanguage: string;
 
   private abortController: AbortController;
+  /** Set on speech start for clients without deferred barge-in; consumed on delivery. */
+  private interruptAgentOnTranscript = false;
   private closed = false;
   private readonly onIdle: (() => void) | undefined;
   private processingPhase: ProcessingPhase = "idle";
@@ -1091,6 +1093,7 @@ export class VoiceSession {
 
     if (!transcriptText) {
       this.sessionLogger.debug("Empty transcription (false positive), not aborting");
+      this.interruptAgentOnTranscript = false;
       this.setPhase("idle");
       if (!this.isDetectorSpeaking) {
         this.clearSpeechInProgress("empty transcription");
@@ -1154,6 +1157,12 @@ export class VoiceSession {
       return;
     }
 
+    if (this.interruptAgentOnTranscript) {
+      // Real speech from a client without deferred barge-in: interrupt whatever the
+      // agent is doing before delivering it.
+      this.interruptAgentOnTranscript = false;
+      await this.interruptVoiceAgentIfRunning();
+    }
     await this.host.sendSpokenInput(agentId, result.text);
     await this.flushPendingAudioSegments("transcription complete");
   }
@@ -1212,9 +1221,10 @@ export class VoiceSession {
   /**
    * Handle abort request from client
    */
-  async handleAbort(): Promise<void> {
+  async handleAbort(options: { interruptAgent?: boolean } = {}): Promise<void> {
+    const interruptAgent = options.interruptAgent ?? true;
     this.sessionLogger.info(
-      { phase: this.processingPhase },
+      { phase: this.processingPhase, interruptAgent },
       `Abort request, phase: ${this.processingPhase}`,
     );
 
@@ -1222,21 +1232,11 @@ export class VoiceSession {
     this.ttsManager.cancelPendingPlaybacks("abort request");
 
     // Voice abort should always interrupt active agent output immediately.
-    if (this.isVoiceMode && this.voiceModeAgentId) {
+    if (interruptAgent && this.isVoiceMode && this.voiceModeAgentId) {
       try {
         await this.host.interruptAgentIfRunning(this.voiceModeAgentId);
       } catch (error) {
-        const message = `Voice interruption failed: ${getErrorMessage(error)}`;
-        this.emit({
-          type: "activity_log",
-          payload: {
-            id: uuidv4(),
-            timestamp: new Date(),
-            type: "error",
-            content: message,
-            metadata: { voiceAbortFailed: true },
-          },
-        });
+        this.emitVoiceInterruptionFailure(error);
         throw error;
       }
     }
@@ -1252,6 +1252,31 @@ export class VoiceSession {
     this.setPhase("idle");
     this.pendingAudioSegments = [];
     this.clearBufferTimeout();
+  }
+
+  private emitVoiceInterruptionFailure(error: unknown): void {
+    this.emit({
+      type: "activity_log",
+      payload: {
+        id: uuidv4(),
+        timestamp: new Date(),
+        type: "error",
+        content: `Voice interruption failed: ${getErrorMessage(error)}`,
+        metadata: { voiceAbortFailed: true },
+      },
+    });
+  }
+
+  private async interruptVoiceAgentIfRunning(): Promise<void> {
+    if (!this.isVoiceMode || !this.voiceModeAgentId) {
+      return;
+    }
+    try {
+      await this.host.interruptAgentIfRunning(this.voiceModeAgentId);
+    } catch (error) {
+      this.emitVoiceInterruptionFailure(error);
+      throw error;
+    }
   }
 
   /**
@@ -1404,8 +1429,13 @@ export class VoiceSession {
 
     this.dropBufferedInput();
 
+    // Clients without deferred barge-in: detected speech stops playback at once, but
+    // the agent run is only interrupted once a non-empty transcript arrives, so a
+    // false trigger cannot kill work. Re-arm so a later speak call is still heard.
     this.abortController.abort();
-    await this.handleAbort();
+    await this.handleAbort({ interruptAgent: false });
+    this.createAbortController();
+    this.interruptAgentOnTranscript = true;
 
     const latencyMs = Date.now() - chunkReceivedAt;
     this.sessionLogger.debug(
