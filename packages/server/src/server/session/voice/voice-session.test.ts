@@ -136,7 +136,7 @@ async function settle(): Promise<void> {
 }
 
 describe("VoiceSession streaming transcription", () => {
-  test("speech detection stops playback but leaves the agent running until a transcript arrives", async () => {
+  test("interrupts playback and the agent on speech detection without partial transcripts", async () => {
     const tts: TextToSpeechProvider = {
       async synthesizeSpeech() {
         return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
@@ -158,7 +158,7 @@ describe("VoiceSession streaming transcription", () => {
         type: "voice_input_state",
         payload: { isSpeaking: true },
       });
-      expect(interrupted).toEqual([]);
+      expect(interrupted).toEqual([VOICE_AGENT_ID]);
       await playback;
     } finally {
       await voiceSession.cleanup();
@@ -229,15 +229,12 @@ describe("VoiceSession streaming transcription", () => {
 
   test("delivers the streaming final transcript to the agent exactly once", async () => {
     const { voiceSession, detector, sttSession, host } = createVoiceSession();
-    const interrupt = vi.fn(async () => {});
-    host.interruptAgentIfRunning = interrupt;
 
     await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
     detector.emit("speech_started");
     await settle();
     detector.emit("speech_stopped");
     await settle();
-    expect(interrupt).not.toHaveBeenCalled();
     sttSession.emitCommitted({ segmentId: "segment-1", previousSegmentId: null });
     sttSession.emitTranscript({
       segmentId: "segment-1",
@@ -247,11 +244,9 @@ describe("VoiceSession streaming transcription", () => {
       avgLogprob: -0.1,
       isLowConfidence: false,
     });
-    await vi.waitFor(() => expect(host.spokenInput).toHaveLength(1));
+    await settle();
 
     expect(sttSession.commitCount).toBe(1);
-    expect(interrupt).toHaveBeenCalledTimes(1);
-    expect(interrupt).toHaveBeenCalledWith(VOICE_AGENT_ID);
     expect(host.spokenInput).toEqual([
       { agentId: VOICE_AGENT_ID, text: "ship the streaming final" },
     ]);
@@ -300,8 +295,6 @@ describe("VoiceSession streaming transcription", () => {
 
   test("filters a low-confidence streaming final without submitting to the agent", async () => {
     const { voiceSession, detector, sttSession, host } = createVoiceSession();
-    const interrupt = vi.fn(async () => {});
-    host.interruptAgentIfRunning = interrupt;
 
     await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
     detector.emit("speech_started");
@@ -319,7 +312,6 @@ describe("VoiceSession streaming transcription", () => {
     await settle();
 
     expect(host.spokenInput).toEqual([]);
-    expect(interrupt).not.toHaveBeenCalled();
     expect(host.emitted).toContainEqual(
       expect.objectContaining({
         type: "transcription_result",

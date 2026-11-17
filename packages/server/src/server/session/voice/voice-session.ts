@@ -985,8 +985,6 @@ export class VoiceSession {
 
     if (!transcriptText) {
       this.sessionLogger.debug("Empty transcription (false positive), not aborting");
-      // Speech start aborted playback; re-arm so the agent's next speak call is heard.
-      this.createAbortController();
       this.setPhase("idle");
       this.clearSpeechInProgress("empty transcription");
       await this.flushPendingAudioSegments("empty transcription");
@@ -1048,8 +1046,6 @@ export class VoiceSession {
       return;
     }
 
-    // Real speech: interrupt whatever the agent is doing before delivering it.
-    await this.interruptVoiceAgentIfRunning();
     await this.host.sendSpokenInput(agentId, result.text);
     await this.flushPendingAudioSegments("transcription complete");
   }
@@ -1098,19 +1094,33 @@ export class VoiceSession {
   /**
    * Handle abort request from client
    */
-  async handleAbort(options: { interruptAgent?: boolean } = {}): Promise<void> {
-    const interruptAgent = options.interruptAgent ?? true;
+  async handleAbort(): Promise<void> {
     this.sessionLogger.info(
-      { phase: this.processingPhase, interruptAgent },
+      { phase: this.processingPhase },
       `Abort request, phase: ${this.processingPhase}`,
     );
 
     this.abortController.abort();
     this.ttsManager.cancelPendingPlaybacks("abort request");
 
-    // An explicit voice abort always interrupts active agent output immediately.
-    if (interruptAgent) {
-      await this.interruptVoiceAgentIfRunning();
+    // Voice abort should always interrupt active agent output immediately.
+    if (this.isVoiceMode && this.voiceModeAgentId) {
+      try {
+        await this.host.interruptAgentIfRunning(this.voiceModeAgentId);
+      } catch (error) {
+        const message = `Voice interruption failed: ${getErrorMessage(error)}`;
+        this.emit({
+          type: "activity_log",
+          payload: {
+            id: uuidv4(),
+            timestamp: new Date(),
+            type: "error",
+            content: message,
+            metadata: { voiceAbortFailed: true },
+          },
+        });
+        throw error;
+      }
     }
 
     if (this.processingPhase === "transcribing") {
@@ -1124,28 +1134,6 @@ export class VoiceSession {
     this.setPhase("idle");
     this.pendingAudioSegments = [];
     this.clearBufferTimeout();
-  }
-
-  private async interruptVoiceAgentIfRunning(): Promise<void> {
-    if (!this.isVoiceMode || !this.voiceModeAgentId) {
-      return;
-    }
-    try {
-      await this.host.interruptAgentIfRunning(this.voiceModeAgentId);
-    } catch (error) {
-      const message = `Voice interruption failed: ${getErrorMessage(error)}`;
-      this.emit({
-        type: "activity_log",
-        payload: {
-          id: uuidv4(),
-          timestamp: new Date(),
-          type: "error",
-          content: message,
-          metadata: { voiceAbortFailed: true },
-        },
-      });
-      throw error;
-    }
   }
 
   /**
@@ -1168,7 +1156,7 @@ export class VoiceSession {
     const hadActiveStream = this.host.hasActiveAgentRun(this.voiceModeAgentId);
 
     this.speechInProgress = true;
-    this.sessionLogger.debug("Voice speech detected – aborting playback");
+    this.sessionLogger.debug("Voice speech detected – aborting playback and active agent run");
 
     if (this.pendingAudioSegments.length > 0) {
       this.sessionLogger.debug(
@@ -1190,10 +1178,8 @@ export class VoiceSession {
 
     this.clearBufferTimeout();
 
-    // Detected speech stops playback at once. The agent run is only interrupted
-    // once a non-empty transcript arrives, so a false trigger cannot kill work.
     this.abortController.abort();
-    await this.handleAbort({ interruptAgent: false });
+    await this.handleAbort();
 
     const latencyMs = Date.now() - chunkReceivedAt;
     this.sessionLogger.debug(
