@@ -16,7 +16,9 @@ const SILERO_MIN_SILENCE_DURATION = 0.2;
 const SILERO_MIN_SPEECH_DURATION = 0.1;
 
 // Our boundary detection thresholds (in milliseconds).
-const DEFAULT_CONFIRM_MS = 800;
+// 800 ms upstream. A lone "okay" or "yes" lasts about 400 ms and was never confirmed;
+// the loud-window check below still rejects clicks and taps.
+const DEFAULT_CONFIRM_MS = 400;
 const DEFAULT_SILENCE_MS = 1000;
 
 // Silero judges the shape of a sound, not its level: after a reset it reports speech on
