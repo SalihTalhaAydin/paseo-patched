@@ -143,6 +143,8 @@ export class OpenAISTT implements SpeechToTextProvider {
           return;
         }
 
+        // Take the segment now: audio that arrives while it is being transcribed belongs
+        // to the next one, and a second commit must not share this segment's id.
         const committedId = segmentId;
         const prev = previousSegmentId;
         const audio = pcm16;
