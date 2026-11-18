@@ -1276,8 +1276,10 @@ export class Session {
           },
           interruptAgentIfRunning: (agentId) => this.interruptAgentIfRunning(agentId),
           hasActiveAgentRun: (agentId) => this.hasActiveAgentRun(agentId),
-          supportsDeferredBargeIn: () =>
-            this.clientCapabilities.has(CLIENT_CAPS.voiceDeferredBargeIn),
+          // Fork: every client defers. A client without the voice_deferred_barge_in
+          // capability (the official 0.15.4 apps) is stopped with the speaking signal it
+          // already understands, sent once the transcript has the user's words.
+          supportsDeferredBargeIn: () => true,
         },
         logger: this.sessionLogger,
         sessionId: this.sessionId,

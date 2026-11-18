@@ -1069,6 +1069,8 @@ export class VoiceSession {
 
     this.sessionLogger.info({ reason: "speech transcribed" }, "Barge-in verdict: reply stops");
     this.emitTranscriptionResult(result, result.text);
+    // Older clients ignore `playback: "stop"` but stop playback on the speaking signal.
+    this.emit({ type: "voice_input_state", payload: { isSpeaking: true } });
     this.emit({ type: "voice_input_state", payload: { isSpeaking: false, playback: "stop" } });
     await this.handleAbort();
     return false;

@@ -431,6 +431,8 @@ describe("VoiceSession streaming transcription", () => {
             type: "transcription_result",
             payload: expect.objectContaining({ text: transcript }),
           }),
+          // A client that ignores `playback: "stop"` stops on the speaking signal.
+          { type: "voice_input_state", payload: { isSpeaking: true } },
           { type: "voice_input_state", payload: { isSpeaking: false, playback: "stop" } },
         ]);
         expect(interrupted).toEqual([VOICE_AGENT_ID]);
