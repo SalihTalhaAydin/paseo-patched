@@ -722,7 +722,7 @@ describe("VoiceSession streaming transcription", () => {
     }
   });
 
-  test("transcribes unbroken sound during a reply after four seconds without waiting for silence", async () => {
+  test("transcribes unbroken sound during a reply after 1.5 seconds without waiting for silence", async () => {
     const { voiceSession, detector, sttSession, host, speak } = createVoiceSession(FAKE_TTS);
     host.supportsDeferredBargeIn = () => true;
     await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
@@ -731,7 +731,7 @@ describe("VoiceSession streaming transcription", () => {
       await waitForAudioOutput(host);
       vi.useFakeTimers();
       detector.emit("speech_started");
-      await vi.advanceTimersByTimeAsync(3900);
+      await vi.advanceTimersByTimeAsync(1400);
       expect(sttSession.commitCount).toBe(0);
       await vi.advanceTimersByTimeAsync(100);
       expect(sttSession.commitCount).toBe(1);
@@ -759,12 +759,65 @@ describe("VoiceSession streaming transcription", () => {
       sttSession.emitTranscript({ segmentId: "tail", transcript: "", isFinal: true });
       await vi.advanceTimersByTimeAsync(0);
       expect(bargeInMessages(host)).toHaveLength(toldSoFar);
+      // The cut clip's words were held for the rest of the utterance; nothing more came.
+      expect(host.spokenInput).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1600);
     } finally {
       vi.useRealTimers();
       await voiceSession.cleanup();
       await playback.catch(() => {});
     }
     expect(host.spokenInput.map((input) => input.text)).toEqual(["Stop. What year was that?"]);
+  });
+
+  test("a long utterance over a reply stops the reply at the cut and arrives as one message", async () => {
+    const { voiceSession, detector, sttSession, host, speak } = createVoiceSession(FAKE_TTS);
+    host.supportsDeferredBargeIn = () => true;
+    const interrupted: string[] = [];
+    host.interruptAgentIfRunning = async (agentId) => {
+      interrupted.push(agentId);
+    };
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    const playback = speak({ text: BICYCLE_REPLY });
+    try {
+      await waitForAudioOutput(host);
+      vi.useFakeTimers();
+      await vi.advanceTimersByTimeAsync(4000);
+      detector.emit("speech_started");
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(sttSession.commitCount).toBe(1);
+      sttSession.emitCommitted({ segmentId: "head", previousSegmentId: null });
+      sttSession.emitTranscript({ segmentId: "head", transcript: "Wait, I think", isFinal: true });
+      await vi.advanceTimersByTimeAsync(0);
+      // The reply and the agent stop at the cut, but nothing is delivered yet.
+      expect(host.emitted).toContainEqual({
+        type: "voice_input_state",
+        payload: { isSpeaking: false, playback: "stop" },
+      });
+      expect(interrupted).toEqual([VOICE_AGENT_ID]);
+      expect(host.spokenInput).toEqual([]);
+
+      // The user is still talking: the rest is an ordinary utterance.
+      detector.emit("speech_started");
+      await vi.advanceTimersByTimeAsync(1000);
+      detector.emit("speech_stopped");
+      await vi.advanceTimersByTimeAsync(0);
+      sttSession.emitCommitted({ segmentId: "rest", previousSegmentId: "head" });
+      sttSession.emitTranscript({
+        segmentId: "rest",
+        transcript: "we should use the other one.",
+        isFinal: true,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2000);
+    } finally {
+      vi.useRealTimers();
+      await voiceSession.cleanup();
+      await playback.catch(() => {});
+    }
+    expect(host.spokenInput.map((input) => input.text)).toEqual([
+      "Wait, I think we should use the other one.",
+    ]);
   });
 
   test("session abort stops later audio even when the speak tool supplies its own signal", async () => {

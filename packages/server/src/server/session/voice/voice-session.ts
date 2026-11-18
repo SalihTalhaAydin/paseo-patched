@@ -193,6 +193,9 @@ export class VoiceSession {
   /** The utterance being captured now is deferred. */
   private capturingDeferredClip = false;
   private bargeInClipTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Words from a clip cut mid-utterance, held until the rest of the utterance arrives. */
+  private carriedSpeech: string | null = null;
+  private carriedSpeechTimer: ReturnType<typeof setTimeout> | null = null;
   /** Replies sent to speech: playing (endedAt null) or ended within ECHO_TAIL_MS. */
   private spokenReplies: SpokenReply[] = [];
 
@@ -457,6 +460,7 @@ export class VoiceSession {
       await this.disableVoiceModeForActiveAgent(true);
       this.isVoiceMode = false;
       this.clearPendingBargeIn();
+      this.dropCarriedSpeech();
       this.sessionLogger.info({ elapsedMs: Date.now() - startedAt }, "Voice mode disabled");
       if (requestId) {
         this.emit({
@@ -707,6 +711,7 @@ export class VoiceSession {
   private async stopVoiceTurnController(): Promise<void> {
     this.isDetectorSpeaking = false;
     this.clearPendingBargeIn();
+    this.dropCarriedSpeech();
     this.spokenReplies = [];
     this.clearSpeechInProgress("voice turn controller stopped");
     if (!this.voiceTurnController) {
@@ -1073,12 +1078,23 @@ export class VoiceSession {
     this.emit({ type: "voice_input_state", payload: { isSpeaking: true } });
     this.emit({ type: "voice_input_state", payload: { isSpeaking: false, playback: "stop" } });
     await this.handleAbort();
+    if (clip.cut) {
+      // The user is still talking: the reply and the agent are stopped now, and these
+      // words are delivered once, together with the rest of the utterance.
+      this.sessionLogger.info("Cut clip held until the utterance ends");
+      this.holdCarriedSpeech(result.text);
+      this.createAbortController();
+      this.setPhase("idle");
+      await this.flushPendingAudioSegments("cut clip held");
+      return true;
+    }
     return false;
   }
 
   private async handleTranscriptionResultPayload(
-    result: VoiceTranscriptionResultPayload,
+    incoming: VoiceTranscriptionResultPayload,
   ): Promise<void> {
+    let result = incoming;
     const clip =
       result.utteranceId === undefined ? undefined : this.pendingClips.get(result.utteranceId);
     if (result.utteranceId !== undefined) {
@@ -1090,6 +1106,14 @@ export class VoiceSession {
       }
     } else {
       this.emitTranscriptionResult(result, result.text);
+    }
+    if (this.carriedSpeech !== null) {
+      // The rest of an utterance whose first clip was cut: deliver both parts as one message.
+      const carried = this.carriedSpeech;
+      this.carriedSpeech = null;
+      this.clearCarriedSpeechTimer();
+      const rest = result.text.trim();
+      result = { ...result, text: rest ? `${carried} ${rest}` : carried };
     }
     const transcriptText = result.text.trim();
 
@@ -1375,8 +1399,45 @@ export class VoiceSession {
         { maxClipMs: BARGE_IN_MAX_CLIP_MS },
         "Sound during a reply has not stopped; transcribing it so far",
       );
+      const clip = this.pendingClips.get(utteranceId);
+      if (clip) {
+        clip.cut = true;
+      }
       void this.voiceTurnController?.endUtterance();
     }, BARGE_IN_MAX_CLIP_MS);
+  }
+
+  /** Hold a cut clip's words; deliver them with the rest of the utterance, or alone after a pause. */
+  private holdCarriedSpeech(text: string): void {
+    this.carriedSpeech = this.carriedSpeech ? `${this.carriedSpeech} ${text.trim()}` : text.trim();
+    this.armCarriedSpeechTimer();
+  }
+
+  private armCarriedSpeechTimer(): void {
+    this.clearCarriedSpeechTimer();
+    this.carriedSpeechTimer = setTimeout(() => {
+      this.carriedSpeechTimer = null;
+      if (this.carriedSpeech === null) {
+        return;
+      }
+      if (this.isDetectorSpeaking || this.processingPhase === "transcribing") {
+        // The rest of the utterance is still coming; its transcript will carry these words.
+        this.armCarriedSpeechTimer();
+        return;
+      }
+      const text = this.carriedSpeech;
+      this.carriedSpeech = null;
+      void this.handleTranscriptionResultPayload({ text, requestId: uuidv4() }).catch((error) => {
+        this.sessionLogger.error({ err: error }, "Failed to deliver carried speech");
+      });
+    }, CARRIED_SPEECH_FLUSH_MS);
+  }
+
+  private clearCarriedSpeechTimer(): void {
+    if (this.carriedSpeechTimer) {
+      clearTimeout(this.carriedSpeechTimer);
+      this.carriedSpeechTimer = null;
+    }
   }
 
   private clearBargeInClipTimer(): void {
@@ -1390,6 +1451,11 @@ export class VoiceSession {
     this.pendingClips.clear();
     this.capturingDeferredClip = false;
     this.clearBargeInClipTimer();
+  }
+
+  private dropCarriedSpeech(): void {
+    this.carriedSpeech = null;
+    this.clearCarriedSpeechTimer();
   }
 
   private dropBufferedInput(): void {
@@ -1580,6 +1646,7 @@ export class VoiceSession {
     this.abortController.abort();
     this.clearBufferTimeout();
     this.clearBargeInClipTimer();
+    this.dropCarriedSpeech();
     this.pendingAudioSegments = [];
     this.audioBuffer = null;
     const failures: unknown[] = [];
@@ -1614,7 +1681,11 @@ export class VoiceSession {
 
 const DEFERRED_SPEECH_CONFIRM_MS = 350;
 /** Longest stretch of unbroken sound during a reply before it is transcribed as it stands. */
-const BARGE_IN_MAX_CLIP_MS = 4000;
+// Upstream PR #9438 uses 4000. Shorter here so talking over a reply stops it sooner; the
+// rest of the utterance is joined to the cut clip before delivery (carriedSpeech).
+const BARGE_IN_MAX_CLIP_MS = 1500;
+/** How long a cut clip waits for the rest of the utterance before it is delivered alone. */
+const CARRIED_SPEECH_FLUSH_MS = 1500;
 /**
  * A client's echo canceller needs the first seconds of a reply's audio to adapt, and until
  * then the reply reaches the microphone at full level. Speech-to-text garbles that leak
@@ -1656,6 +1727,8 @@ const INTERRUPT_WORDS = new Set([
 
 interface PendingClip {
   deferred: boolean;
+  /** Cut at BARGE_IN_MAX_CLIP_MS while the user was still talking. */
+  cut?: boolean;
   /** Heard while a reply's echo canceller was still adapting. */
   duringEchoWarmup: boolean;
 }
